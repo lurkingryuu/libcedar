@@ -1,0 +1,57 @@
+name: Rust and C CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Check formatting
+      run: cargo fmt -- --check
+
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
+
+    - name: Build Library (Debug)
+      run: cargo build
+
+    - name: Run Rust tests
+      run: cargo test
+
+    - name: Build Library (Release)
+      run: cargo build --release
+
+    - name: Verify generated header
+      run: test -f include/libcedar.h
+
+    - name: Run C Integration Tests
+      run: |
+        cc -o tests/test_libcedar tests/test_libcedar.c \
+          -Iinclude -Ltarget/release -lcedar \
+          -lpthread -ldl -lm
+        LD_LIBRARY_PATH=target/release ./tests/test_libcedar
