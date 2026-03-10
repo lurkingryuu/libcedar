@@ -13,6 +13,7 @@ libfuzzer-sys = "0.4"
 
 # Reference the parent crate so fuzz targets can import its public API.
 [dependencies.cedar]
+package = "libcedar"
 path = ".."
 
 # Fuzz targets must not run as normal tests or build docs.
