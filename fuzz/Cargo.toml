@@ -1,0 +1,35 @@
+[package]
+name = "libcedar-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# libfuzzer-sys provides the LibFuzzer runtime and the fuzz_target! macro.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# Reference the parent crate so fuzz targets can import its public API.
+[dependencies.cedar]
+path = ".."
+
+# Fuzz targets must not run as normal tests or build docs.
+[[bin]]
+name = "fuzz_policy"
+path = "fuzz_targets/fuzz_policy.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_entities"
+path = "fuzz_targets/fuzz_entities.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_authz"
+path = "fuzz_targets/fuzz_authz.rs"
+test = false
+doc  = false
