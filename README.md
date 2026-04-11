@@ -1,40 +1,91 @@
 # libcedar
 
-A C ABI wrapper for the [Cedar policy engine](https://github.com/cedar-policy/cedar), allowing you to embed Cedar directly in C/C++ applications.
-
-Instead of making external HTTP calls to `cedar-agent`, `libcedar` lets you evaluate policies **in-process**, saving network overhead and simplifying deployments.
+`libcedar` is an installable C SDK for the
+[Cedar policy engine](https://github.com/cedar-policy/cedar). It exposes a
+stable C ABI so C, C++, MySQL plugins, and PostgreSQL extensions can evaluate
+Cedar policies in-process without calling `cedar-agent` over HTTP.
 
 ## Features
 
-- **C-compatible API** for the `cedar-policy` Rust crate (v4.9.0)
-- **Zero-overhead FFI**: Directly passes memory without HTTP serialization
-- **Full Cedar Support**: Handles policies, schemas, contexts, and entities
-- Auto-generates `libcedar.h` using `cbindgen`
-- Builds as both static (`.a`) and dynamic (`.dylib` / `.so`) libraries
+- C-compatible API for the `cedar-policy` Rust crate (`4.7.0`)
+- In-process evaluation for policies, schema, entities, context, and diagnostics
+- Installs as a standard C library package with:
+  - `include/libcedar.h`
+  - `lib/libcedar.{so,dylib}` and `lib/libcedar.a`
+  - `lib/pkgconfig/libcedar.pc`
+- Generated headers via `cbindgen`
+- Release-friendly packaging via `cargo-c`
 
-## Usage
+## Install Contract
 
-### 1. Build the library
+Consumers should treat `libcedar` like a normal installed package. The
+supported contract is the installed prefix, not the Cargo build tree.
 
-You will need the [Rust toolchain](https://rustup.rs/) installed.
+Typical installed layout:
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/libcedar.git
-cd libcedar
-
-# Build in release mode
-cargo build --release
+```text
+<prefix>/
+  include/libcedar.h
+  lib/libcedar.so        # Linux
+  lib/libcedar.dylib     # macOS
+  lib/libcedar.a
+  lib/pkgconfig/libcedar.pc
 ```
 
-This generates:
-- `target/release/libcedar.a` (Static Library)
-- `target/release/libcedar.dylib` / `.so` (Dynamic Library)
-- `include/libcedar.h` (C Header)
+The recommended discovery mechanism is `pkg-config`.
 
-### 2. Include in your C project
+## Building And Installing
 
-Add `-Iinclude` and `-Ltarget/release -lcedar` to your compiler flags.
+### Preferred: install from an existing package/release artifact
+
+GitHub Releases should publish prebuilt package tarballs for supported
+platforms. The release archives are intended to be extracted into
+`/opt/libcedar`, matching the packaged `pkg-config` prefix used by downstream
+Docker builds.
+
+```bash
+mkdir -p /opt/libcedar
+tar -xzf libcedar-<version>-<target>.tar.gz -C /opt/libcedar
+export PKG_CONFIG_PATH=/opt/libcedar/lib/pkgconfig:$PKG_CONFIG_PATH
+```
+
+For a different install prefix, prefer building from source with `cargo-c`.
+
+### Source install with `cargo-c`
+
+You will need the Rust toolchain and [`cargo-c`](https://crates.io/crates/cargo-c).
+
+```bash
+git clone https://github.com/lurkingryuu/libcedar.git
+cd libcedar
+
+cargo install cargo-c --locked --version 0.10.19+cargo-0.93.0
+cargo cbuild --release
+cargo cinstall --release --prefix=/usr/local
+```
+
+For staged packaging:
+
+```bash
+cargo cinstall --release --prefix=/usr/local --destdir="$PWD/stage"
+```
+
+## Using From C Or C++
+
+Use `pkg-config` rather than direct `target/release` paths:
+
+```bash
+cc app.c $(pkg-config --cflags --libs libcedar)
+```
+
+If the package is installed in a non-default prefix:
+
+```bash
+export PKG_CONFIG_PATH=/opt/libcedar/lib/pkgconfig:$PKG_CONFIG_PATH
+cc app.c $(pkg-config --cflags --libs libcedar)
+```
+
+Example:
 
 ```c
 #include <stdio.h>
@@ -78,8 +129,16 @@ int main() {
 - `cedar_engine_set_schema_json(engine, json)` - Load Cedar schema.
 - `cedar_engine_set_entities_json(engine, json)` - Load entity data.
 - `cedar_engine_is_authorized(engine, principal, action, resource, context_json)` - Evaluate an authorization request. Returns `Allow` (0), `Deny` (1), or `Error` (-1).
+- `cedar_engine_is_authorized_no_diagnostics(engine, principal, action, resource, context_json)` - Evaluate without materializing diagnostics on the success path.
 - `cedar_engine_last_error(engine)` - Retrieve error details.
 - `cedar_engine_get_diagnostics(engine)` - Retrieve evaluation diagnostics (reasons/errors) as JSON.
+
+## Consumer Guidance
+
+- Do not depend on `target/release` paths from a local checkout.
+- Do not clone `libcedar` inside downstream builds just to compile it.
+- Install `libcedar` into a prefix and consume it via `pkg-config`.
+- Use GitHub release artifacts in CI, Docker builds, and packaged deployments.
 
 ## License
 

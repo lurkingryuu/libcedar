@@ -1,0 +1,85 @@
+name: Package Libcedar Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to package (for example v0.1.0)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-c
+        run: cargo install cargo-c --locked --version 0.10.19+cargo-0.93.0
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            version="${{ github.event.inputs.release_tag }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
+          echo "tag=${version}" >> "$GITHUB_OUTPUT"
+          echo "plain=${version#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and stage package
+        shell: bash
+        run: |
+          cargo cinstall --release --target "${{ matrix.target }}" --prefix=/opt/libcedar --destdir="$RUNNER_TEMP/libcedar-stage"
+
+      - name: Archive install prefix
+        id: archive
+        shell: bash
+        run: |
+          archive="libcedar-${{ steps.version.outputs.plain }}-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C "$RUNNER_TEMP/libcedar-stage/opt/libcedar" .
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.archive.outputs.archive }}
+          path: ${{ steps.archive.outputs.archive }}
+
+      - name: Publish release asset
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.archive.outputs.archive }}

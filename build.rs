@@ -2,10 +2,13 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=cbindgen.toml");
+
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let output_dir = PathBuf::from(&crate_dir).join("include");
 
-    // Create include directory if it doesn't exist
+    // Keep a checked-in header for local development and non-cargo-c builds.
     std::fs::create_dir_all(&output_dir).expect("Failed to create include directory");
 
     let config =

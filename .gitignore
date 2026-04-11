@@ -6,3 +6,4 @@
 /tests/test_libcedar
 .cargo-home/
 .cargo-tools/
+.pkg-stage/

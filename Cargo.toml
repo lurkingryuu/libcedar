@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "C bindings for the Cedar policy engine — embedded PDP for PostgreSQL"
 license = "Apache-2.0"
+repository = "https://github.com/lurkingryuu/libcedar"
+homepage = "https://github.com/lurkingryuu/libcedar"
+readme = "README.md"
 
 [lib]
 name = "cedar"
@@ -15,8 +18,23 @@ serde_json = "1"
 libc = "0.2"
 
 [build-dependencies]
-cbindgen = "0.27"
+cbindgen = "0.29"
 
 [dev-dependencies]
 # For integration tests that exercise FFI
 libc = "0.2"
+
+[package.metadata.capi]
+min_version = "0.10.19"
+
+[package.metadata.capi.header]
+name = "libcedar.h"
+subdirectory = ""
+generation = true
+emit_version_constants = false
+
+[package.metadata.capi.pkg_config]
+name = "libcedar"
+filename = "libcedar"
+description = "C bindings for the Cedar policy engine"
+version = "0.1.0"

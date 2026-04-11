@@ -2,12 +2,10 @@
  * test_libcedar.c — Smoke test for the libcedar C bindings
  *
  * Compile:
- *   cc -o test_libcedar test_libcedar.c \
- *      -I../include -L../target/release -lcedar \
- *      -framework Security -framework CoreFoundation -lresolv
+ *   cc -o test_libcedar test_libcedar.c $(pkg-config --cflags --libs libcedar)
  *
  * Run:
- *   ./test_libcedar
+ *   LD_LIBRARY_PATH=/usr/local/lib ./test_libcedar
  */
 
 #include <stdio.h>
