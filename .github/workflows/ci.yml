@@ -53,15 +53,28 @@ jobs:
         mkdir -p "$RUNNER_TEMP/libcedar-stage"
         cargo cinstall --release --prefix=/opt/libcedar --destdir="$RUNNER_TEMP/libcedar-stage"
 
+    - name: Discover staged libcedar paths
+      run: |
+        prefix="$RUNNER_TEMP/libcedar-stage/opt/libcedar"
+        for candidate in "$prefix/lib/pkgconfig" "$prefix"/lib/*/pkgconfig; do
+          if [ -f "$candidate/libcedar.pc" ]; then
+            echo "LIBCEDAR_PKGCONFIG_DIR=$candidate" >> "$GITHUB_ENV"
+            echo "LIBCEDAR_LIB_DIR=$(dirname "$candidate")" >> "$GITHUB_ENV"
+            exit 0
+          fi
+        done
+        echo "Unable to locate staged libcedar.pc under $prefix" >&2
+        exit 1
+
     - name: Verify staged package layout
       run: |
         ls -R "$RUNNER_TEMP/libcedar-stage"
         test -f "$RUNNER_TEMP/libcedar-stage/opt/libcedar/include/libcedar.h"
-        test -f "$RUNNER_TEMP/libcedar-stage/opt/libcedar/lib/pkgconfig/libcedar.pc"
+        test -f "$LIBCEDAR_PKGCONFIG_DIR/libcedar.pc"
 
     - name: Run C integration tests against installed package
       run: |
         export PKG_CONFIG_SYSROOT_DIR="$RUNNER_TEMP/libcedar-stage"
-        export PKG_CONFIG_PATH="$RUNNER_TEMP/libcedar-stage/opt/libcedar/lib/pkgconfig"
+        export PKG_CONFIG_PATH="$LIBCEDAR_PKGCONFIG_DIR"
         cc -o tests/test_libcedar tests/test_libcedar.c $(pkg-config --cflags --libs libcedar)
-        LD_LIBRARY_PATH="$RUNNER_TEMP/libcedar-stage/opt/libcedar/lib" ./tests/test_libcedar
+        LD_LIBRARY_PATH="$LIBCEDAR_LIB_DIR" ./tests/test_libcedar
