@@ -36,7 +36,7 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -74,13 +74,21 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.archive.outputs.archive }}
           path: ${{ steps.archive.outputs.archive }}
 
       - name: Publish release asset
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.archive.outputs.archive }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            gh release upload "${{ steps.version.outputs.tag }}" "${{ steps.archive.outputs.archive }}" --clobber
+          else
+            gh release create "${{ steps.version.outputs.tag }}" "${{ steps.archive.outputs.archive }}" \
+              --title "${{ steps.version.outputs.tag }}" \
+              --notes ""
+          fi
