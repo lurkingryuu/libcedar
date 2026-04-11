@@ -4,3 +4,5 @@
 *.swp
 .DS_Store
 /tests/test_libcedar
+.cargo-home/
+.cargo-tools/
