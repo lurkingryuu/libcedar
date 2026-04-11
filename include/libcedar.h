@@ -111,6 +111,18 @@ enum CedarDecision cedar_engine_is_authorized(struct CedarEngine *engine,
                                               const char *resource,
                                               const char *context_json);
 
+// Evaluate an authorization request without materializing diagnostics.
+//
+// This is intended for hot paths that only care about the allow/deny result and
+// will inspect `cedar_engine_last_error()` only when the return value is `Error`.
+// On successful evaluations the previous error/diagnostics state is left untouched
+// to avoid mutating the engine on every request.
+enum CedarDecision cedar_engine_is_authorized_no_diagnostics(struct CedarEngine *engine,
+                                                             const char *principal,
+                                                             const char *action,
+                                                             const char *resource,
+                                                             const char *context_json);
+
 // Get the last error message.
 //
 // Returns a pointer to a null-terminated C string, or `NULL` if no error is set.

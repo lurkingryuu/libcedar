@@ -70,6 +70,138 @@ impl CedarEngine {
     }
 }
 
+fn authorization_error(
+    engine: &mut CedarEngine,
+    msg: String,
+    clear_diagnostics: bool,
+) -> CedarDecision {
+    if clear_diagnostics {
+        engine.last_diagnostics = None;
+    }
+    engine.set_error(msg);
+    CedarDecision::Error
+}
+
+fn store_diagnostics(engine: &mut CedarEngine, response: &cedar_policy::Response) {
+    let diag = response.diagnostics();
+    let reasons: Vec<String> = diag.reason().map(|r| r.to_string()).collect();
+    let errors: Vec<String> = diag.errors().map(|e| e.to_string()).collect();
+    let diag_str = format!(
+        "{{\"reasons\":[{}],\"errors\":[{}]}}",
+        reasons
+            .iter()
+            .map(|r| format!("\"{}\"", r.replace('\"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(","),
+        errors
+            .iter()
+            .map(|e| format!("\"{}\"", e.replace('\"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    engine.last_diagnostics = CString::new(diag_str).ok();
+}
+
+fn cedar_engine_is_authorized_impl(
+    engine: &mut CedarEngine,
+    principal: *const c_char,
+    action: *const c_char,
+    resource: *const c_char,
+    context_json: *const c_char,
+    store_diag: bool,
+    clear_error: bool,
+) -> CedarDecision {
+    if clear_error {
+        engine.clear_error();
+    }
+    if store_diag {
+        engine.last_diagnostics = None;
+    }
+
+    let principal_str = match unsafe { cstr_to_str(principal) } {
+        Ok(s) => s,
+        Err(e) => return authorization_error(engine, format!("principal: {e}"), store_diag),
+    };
+    let principal_euid = match EntityUid::from_str(principal_str) {
+        Ok(euid) => euid,
+        Err(e) => {
+            return authorization_error(engine, format!("principal parse error: {e}"), store_diag)
+        }
+    };
+
+    let action_str = match unsafe { cstr_to_str(action) } {
+        Ok(s) => s,
+        Err(e) => return authorization_error(engine, format!("action: {e}"), store_diag),
+    };
+    let action_euid = match EntityUid::from_str(action_str) {
+        Ok(euid) => euid,
+        Err(e) => {
+            return authorization_error(engine, format!("action parse error: {e}"), store_diag)
+        }
+    };
+
+    let resource_str = match unsafe { cstr_to_str(resource) } {
+        Ok(s) => s,
+        Err(e) => return authorization_error(engine, format!("resource: {e}"), store_diag),
+    };
+    let resource_euid = match EntityUid::from_str(resource_str) {
+        Ok(euid) => euid,
+        Err(e) => {
+            return authorization_error(engine, format!("resource parse error: {e}"), store_diag)
+        }
+    };
+
+    let context = if context_json.is_null() {
+        Context::empty()
+    } else {
+        let ctx_str = match unsafe { cstr_to_str(context_json) } {
+            Ok(s) => s,
+            Err(e) => return authorization_error(engine, format!("context_json: {e}"), store_diag),
+        };
+        let ctx_value: serde_json::Value = match serde_json::from_str(ctx_str) {
+            Ok(v) => v,
+            Err(e) => {
+                return authorization_error(
+                    engine,
+                    format!("context JSON parse error: {e}"),
+                    store_diag,
+                )
+            }
+        };
+        let schema_and_action = engine.schema.as_ref().map(|s| (s, &action_euid));
+        match Context::from_json_value(ctx_value, schema_and_action) {
+            Ok(c) => c,
+            Err(e) => {
+                return authorization_error(engine, format!("context error: {e}"), store_diag)
+            }
+        }
+    };
+
+    let request = match Request::new(
+        principal_euid,
+        action_euid,
+        resource_euid,
+        context,
+        engine.schema.as_ref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => return authorization_error(engine, format!("request error: {e}"), store_diag),
+    };
+
+    let response = engine
+        .authorizer
+        .is_authorized(&request, &engine.policies, &engine.entities);
+
+    if store_diag {
+        store_diagnostics(engine, &response);
+    }
+
+    match response.decision() {
+        cedar_policy::Decision::Allow => CedarDecision::Allow,
+        cedar_policy::Decision::Deny => CedarDecision::Deny,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper: safely convert a `*const c_char` to a `&str`
 // ---------------------------------------------------------------------------
@@ -344,130 +476,44 @@ pub extern "C" fn cedar_engine_is_authorized(
         return CedarDecision::Error;
     }
     let engine = unsafe { &mut *engine };
-    engine.clear_error();
-    engine.last_diagnostics = None;
+    cedar_engine_is_authorized_impl(
+        engine,
+        principal,
+        action,
+        resource,
+        context_json,
+        true,
+        true,
+    )
+}
 
-    // Parse principal
-    let principal_str = match unsafe { cstr_to_str(principal) } {
-        Ok(s) => s,
-        Err(e) => {
-            engine.set_error(format!("principal: {e}"));
-            return CedarDecision::Error;
-        }
-    };
-    let principal_euid = match EntityUid::from_str(principal_str) {
-        Ok(euid) => euid,
-        Err(e) => {
-            engine.set_error(format!("principal parse error: {e}"));
-            return CedarDecision::Error;
-        }
-    };
-
-    // Parse action
-    let action_str = match unsafe { cstr_to_str(action) } {
-        Ok(s) => s,
-        Err(e) => {
-            engine.set_error(format!("action: {e}"));
-            return CedarDecision::Error;
-        }
-    };
-    let action_euid = match EntityUid::from_str(action_str) {
-        Ok(euid) => euid,
-        Err(e) => {
-            engine.set_error(format!("action parse error: {e}"));
-            return CedarDecision::Error;
-        }
-    };
-
-    // Parse resource
-    let resource_str = match unsafe { cstr_to_str(resource) } {
-        Ok(s) => s,
-        Err(e) => {
-            engine.set_error(format!("resource: {e}"));
-            return CedarDecision::Error;
-        }
-    };
-    let resource_euid = match EntityUid::from_str(resource_str) {
-        Ok(euid) => euid,
-        Err(e) => {
-            engine.set_error(format!("resource parse error: {e}"));
-            return CedarDecision::Error;
-        }
-    };
-
-    // Parse context
-    let context = if context_json.is_null() {
-        Context::empty()
-    } else {
-        let ctx_str = match unsafe { cstr_to_str(context_json) } {
-            Ok(s) => s,
-            Err(e) => {
-                engine.set_error(format!("context_json: {e}"));
-                return CedarDecision::Error;
-            }
-        };
-        let ctx_value: serde_json::Value = match serde_json::from_str(ctx_str) {
-            Ok(v) => v,
-            Err(e) => {
-                engine.set_error(format!("context JSON parse error: {e}"));
-                return CedarDecision::Error;
-            }
-        };
-        // v4.9.0: Context::from_json_value takes Option<(&Schema, &EntityUid)>
-        // We pass the action_euid so schema-based context validation works.
-        let schema_and_action = engine.schema.as_ref().map(|s| (s, &action_euid));
-        match Context::from_json_value(ctx_value, schema_and_action) {
-            Ok(c) => c,
-            Err(e) => {
-                engine.set_error(format!("context error: {e}"));
-                return CedarDecision::Error;
-            }
-        }
-    };
-
-    // Build the request
-    let request = match Request::new(
-        principal_euid,
-        action_euid,
-        resource_euid,
-        context,
-        engine.schema.as_ref(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            engine.set_error(format!("request error: {e}"));
-            return CedarDecision::Error;
-        }
-    };
-
-    // Evaluate
-    let response = engine
-        .authorizer
-        .is_authorized(&request, &engine.policies, &engine.entities);
-
-    // Store diagnostics
-    let diag = response.diagnostics();
-    let reasons: Vec<String> = diag.reason().map(|r| r.to_string()).collect();
-    let errors: Vec<String> = diag.errors().map(|e| e.to_string()).collect();
-    let diag_str = format!(
-        "{{\"reasons\":[{}],\"errors\":[{}]}}",
-        reasons
-            .iter()
-            .map(|r| format!("\"{}\"", r.replace('\"', "\\\"")))
-            .collect::<Vec<_>>()
-            .join(","),
-        errors
-            .iter()
-            .map(|e| format!("\"{}\"", e.replace('\"', "\\\"")))
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    engine.last_diagnostics = CString::new(diag_str).ok();
-
-    match response.decision() {
-        cedar_policy::Decision::Allow => CedarDecision::Allow,
-        cedar_policy::Decision::Deny => CedarDecision::Deny,
+/// Evaluate an authorization request without materializing diagnostics.
+///
+/// This is intended for hot paths that only care about the allow/deny result and
+/// will inspect `cedar_engine_last_error()` only when the return value is `Error`.
+/// On successful evaluations the previous error/diagnostics state is left untouched
+/// to avoid mutating the engine on every request.
+#[no_mangle]
+pub extern "C" fn cedar_engine_is_authorized_no_diagnostics(
+    engine: *mut CedarEngine,
+    principal: *const c_char,
+    action: *const c_char,
+    resource: *const c_char,
+    context_json: *const c_char,
+) -> CedarDecision {
+    if engine.is_null() {
+        return CedarDecision::Error;
     }
+    let engine = unsafe { &mut *engine };
+    cedar_engine_is_authorized_impl(
+        engine,
+        principal,
+        action,
+        resource,
+        context_json,
+        false,
+        false,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +818,65 @@ mod tests {
     }
 
     #[test]
+    fn test_no_diagnostics_path_skips_materialization() {
+        let engine = cedar_engine_new();
+
+        let policy = CString::new(
+            r#"permit(principal == User::"alice", action == Action::"view", resource == File::"93");"#,
+        )
+        .unwrap();
+        cedar_engine_set_policies(engine, policy.as_ptr());
+
+        let principal = CString::new(r#"User::"alice""#).unwrap();
+        let action = CString::new(r#"Action::"view""#).unwrap();
+        let resource = CString::new(r#"File::"93""#).unwrap();
+
+        let decision = cedar_engine_is_authorized_no_diagnostics(
+            engine,
+            principal.as_ptr(),
+            action.as_ptr(),
+            resource.as_ptr(),
+            std::ptr::null(),
+        );
+        assert!(matches!(decision, CedarDecision::Allow));
+        assert!(
+            cedar_engine_get_diagnostics(engine).is_null(),
+            "no-diagnostics path should not populate diagnostics"
+        );
+
+        cedar_engine_free(engine);
+    }
+
+    #[test]
+    fn test_no_diagnostics_path_sets_error_on_failure() {
+        let engine = cedar_engine_new();
+
+        let policy = CString::new(
+            r#"permit(principal == User::"alice", action == Action::"view", resource == File::"93");"#,
+        )
+        .unwrap();
+        cedar_engine_set_policies(engine, policy.as_ptr());
+
+        let bad_principal = CString::new(r#"User::alice"#).unwrap();
+        let action = CString::new(r#"Action::"view""#).unwrap();
+        let resource = CString::new(r#"File::"93""#).unwrap();
+
+        let decision = cedar_engine_is_authorized_no_diagnostics(
+            engine,
+            bad_principal.as_ptr(),
+            action.as_ptr(),
+            resource.as_ptr(),
+            std::ptr::null(),
+        );
+        assert!(matches!(decision, CedarDecision::Error));
+
+        let err = cedar_engine_last_error(engine);
+        assert!(!err.is_null(), "error path should still set last_error");
+
+        cedar_engine_free(engine);
+    }
+
+    #[test]
     fn test_add_policies() {
         let engine = cedar_engine_new();
 
@@ -1002,10 +1107,8 @@ mod tests {
         // alice → team_a → department → org (3-level transitive membership)
         let engine = cedar_engine_new();
 
-        let policy = CString::new(
-            r#"permit(principal in Org::"acme", action, resource);"#,
-        )
-        .unwrap();
+        let policy =
+            CString::new(r#"permit(principal in Org::"acme", action, resource);"#).unwrap();
         cedar_engine_set_policies(engine, policy.as_ptr());
 
         let entities = CString::new(
@@ -1021,8 +1124,8 @@ mod tests {
         assert_eq!(rc, 0, "set_entities should succeed");
 
         let principal = CString::new(r#"User::"alice""#).unwrap();
-        let action    = CString::new(r#"Action::"view""#).unwrap();
-        let resource  = CString::new(r#"File::"x""#).unwrap();
+        let action = CString::new(r#"Action::"view""#).unwrap();
+        let resource = CString::new(r#"File::"x""#).unwrap();
 
         let d = cedar_engine_is_authorized(
             engine,
@@ -1043,10 +1146,8 @@ mod tests {
     fn test_entity_not_in_hierarchy_is_denied() {
         let engine = cedar_engine_new();
 
-        let policy = CString::new(
-            r#"permit(principal in Group::"admins", action, resource);"#,
-        )
-        .unwrap();
+        let policy =
+            CString::new(r#"permit(principal in Group::"admins", action, resource);"#).unwrap();
         cedar_engine_set_policies(engine, policy.as_ptr());
 
         // eve is NOT in admins group
@@ -1061,8 +1162,8 @@ mod tests {
         cedar_engine_set_entities_json(engine, entities.as_ptr());
 
         let principal = CString::new(r#"User::"eve""#).unwrap();
-        let action    = CString::new(r#"Action::"admin""#).unwrap();
-        let resource  = CString::new(r#"Resource::"x""#).unwrap();
+        let action = CString::new(r#"Action::"admin""#).unwrap();
+        let resource = CString::new(r#"Resource::"x""#).unwrap();
 
         let d = cedar_engine_is_authorized(
             engine,
@@ -1083,10 +1184,8 @@ mod tests {
     fn test_clear_entities_removes_hierarchy() {
         let engine = cedar_engine_new();
 
-        let policy = CString::new(
-            r#"permit(principal in Group::"admins", action, resource);"#,
-        )
-        .unwrap();
+        let policy =
+            CString::new(r#"permit(principal in Group::"admins", action, resource);"#).unwrap();
         cedar_engine_set_policies(engine, policy.as_ptr());
 
         let entities = CString::new(
@@ -1099,22 +1198,36 @@ mod tests {
         cedar_engine_set_entities_json(engine, entities.as_ptr());
 
         let principal = CString::new(r#"User::"alice""#).unwrap();
-        let action    = CString::new(r#"Action::"do""#).unwrap();
-        let resource  = CString::new(r#"File::"f""#).unwrap();
+        let action = CString::new(r#"Action::"do""#).unwrap();
+        let resource = CString::new(r#"File::"f""#).unwrap();
 
         // With entities loaded: alice is in admins → Allow
         let d1 = cedar_engine_is_authorized(
-            engine, principal.as_ptr(), action.as_ptr(), resource.as_ptr(), std::ptr::null(),
+            engine,
+            principal.as_ptr(),
+            action.as_ptr(),
+            resource.as_ptr(),
+            std::ptr::null(),
         );
-        assert!(matches!(d1, CedarDecision::Allow), "Before clear: alice should be allowed");
+        assert!(
+            matches!(d1, CedarDecision::Allow),
+            "Before clear: alice should be allowed"
+        );
 
         // Clear entities: alice is no longer in admins → Deny
         cedar_engine_clear_entities(engine);
 
         let d2 = cedar_engine_is_authorized(
-            engine, principal.as_ptr(), action.as_ptr(), resource.as_ptr(), std::ptr::null(),
+            engine,
+            principal.as_ptr(),
+            action.as_ptr(),
+            resource.as_ptr(),
+            std::ptr::null(),
         );
-        assert!(matches!(d2, CedarDecision::Deny), "After clear: alice should be denied");
+        assert!(
+            matches!(d2, CedarDecision::Deny),
+            "After clear: alice should be denied"
+        );
 
         cedar_engine_free(engine);
     }
@@ -1136,22 +1249,36 @@ mod tests {
         .unwrap();
         cedar_engine_set_policies(engine, policies.as_ptr());
 
-        let alice   = CString::new(r#"User::"alice""#).unwrap();
-        let view    = CString::new(r#"Action::"view""#).unwrap();
+        let alice = CString::new(r#"User::"alice""#).unwrap();
+        let view = CString::new(r#"Action::"view""#).unwrap();
         let delete_ = CString::new(r#"Action::"DELETE""#).unwrap();
-        let file    = CString::new(r#"File::"x""#).unwrap();
+        let file = CString::new(r#"File::"x""#).unwrap();
 
         // alice can view (permit matches, no forbid)
         let d1 = cedar_engine_is_authorized(
-            engine, alice.as_ptr(), view.as_ptr(), file.as_ptr(), std::ptr::null(),
+            engine,
+            alice.as_ptr(),
+            view.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
         );
-        assert!(matches!(d1, CedarDecision::Allow), "alice view should be allowed");
+        assert!(
+            matches!(d1, CedarDecision::Allow),
+            "alice view should be allowed"
+        );
 
         // alice cannot DELETE (forbid overrides the broad permit)
         let d2 = cedar_engine_is_authorized(
-            engine, alice.as_ptr(), delete_.as_ptr(), file.as_ptr(), std::ptr::null(),
+            engine,
+            alice.as_ptr(),
+            delete_.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
         );
-        assert!(matches!(d2, CedarDecision::Deny), "alice DELETE should be denied by forbid");
+        assert!(
+            matches!(d2, CedarDecision::Deny),
+            "alice DELETE should be denied by forbid"
+        );
 
         cedar_engine_free(engine);
     }
@@ -1170,14 +1297,21 @@ mod tests {
         assert_eq!(rc, 0, "empty policy string should succeed");
 
         let principal = CString::new(r#"User::"alice""#).unwrap();
-        let action    = CString::new(r#"Action::"view""#).unwrap();
-        let resource  = CString::new(r#"File::"x""#).unwrap();
+        let action = CString::new(r#"Action::"view""#).unwrap();
+        let resource = CString::new(r#"File::"x""#).unwrap();
 
         // No permit → Deny by default
         let d = cedar_engine_is_authorized(
-            engine, principal.as_ptr(), action.as_ptr(), resource.as_ptr(), std::ptr::null(),
+            engine,
+            principal.as_ptr(),
+            action.as_ptr(),
+            resource.as_ptr(),
+            std::ptr::null(),
         );
-        assert!(matches!(d, CedarDecision::Deny), "empty policy set should deny all requests");
+        assert!(
+            matches!(d, CedarDecision::Deny),
+            "empty policy set should deny all requests"
+        );
 
         cedar_engine_free(engine);
     }
@@ -1191,7 +1325,10 @@ mod tests {
         assert_eq!(rc, -1, "malformed entity JSON should return -1");
 
         let err = cedar_engine_last_error(engine);
-        assert!(!err.is_null(), "should have an error after malformed entities");
+        assert!(
+            !err.is_null(),
+            "should have an error after malformed entities"
+        );
 
         cedar_engine_free(engine);
     }
@@ -1201,36 +1338,46 @@ mod tests {
         // set_policies should replace the entire PolicySet, not append.
         let engine = cedar_engine_new();
 
-        let policy1 = CString::new(
-            r#"permit(principal == User::"alice", action, resource);"#,
-        ).unwrap();
+        let policy1 =
+            CString::new(r#"permit(principal == User::"alice", action, resource);"#).unwrap();
         cedar_engine_set_policies(engine, policy1.as_ptr());
 
         // Replace with a policy that only allows bob
-        let policy2 = CString::new(
-            r#"permit(principal == User::"bob", action, resource);"#,
-        ).unwrap();
+        let policy2 =
+            CString::new(r#"permit(principal == User::"bob", action, resource);"#).unwrap();
         let rc = cedar_engine_set_policies(engine, policy2.as_ptr());
         assert_eq!(rc, 0, "second set_policies should succeed");
 
-        let alice   = CString::new(r#"User::"alice""#).unwrap();
-        let bob     = CString::new(r#"User::"bob""#).unwrap();
-        let action  = CString::new(r#"Action::"view""#).unwrap();
-        let file    = CString::new(r#"File::"x""#).unwrap();
+        let alice = CString::new(r#"User::"alice""#).unwrap();
+        let bob = CString::new(r#"User::"bob""#).unwrap();
+        let action = CString::new(r#"Action::"view""#).unwrap();
+        let file = CString::new(r#"File::"x""#).unwrap();
 
         // alice should now be denied (first policy replaced)
         let d_alice = cedar_engine_is_authorized(
-            engine, alice.as_ptr(), action.as_ptr(), file.as_ptr(), std::ptr::null(),
+            engine,
+            alice.as_ptr(),
+            action.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
         );
-        assert!(matches!(d_alice, CedarDecision::Deny),
-            "alice should be denied after policy replacement");
+        assert!(
+            matches!(d_alice, CedarDecision::Deny),
+            "alice should be denied after policy replacement"
+        );
 
         // bob should now be allowed
         let d_bob = cedar_engine_is_authorized(
-            engine, bob.as_ptr(), action.as_ptr(), file.as_ptr(), std::ptr::null(),
+            engine,
+            bob.as_ptr(),
+            action.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
         );
-        assert!(matches!(d_bob, CedarDecision::Allow),
-            "bob should be allowed after policy replacement");
+        assert!(
+            matches!(d_bob, CedarDecision::Allow),
+            "bob should be allowed after policy replacement"
+        );
 
         cedar_engine_free(engine);
     }
@@ -1240,38 +1387,64 @@ mod tests {
         let engine_a = cedar_engine_new();
         let engine_b = cedar_engine_new();
 
-        let policy_a = CString::new(
-            r#"permit(principal == User::"alice", action, resource);"#,
-        ).unwrap();
-        let policy_b = CString::new(
-            r#"permit(principal == User::"bob", action, resource);"#,
-        ).unwrap();
+        let policy_a =
+            CString::new(r#"permit(principal == User::"alice", action, resource);"#).unwrap();
+        let policy_b =
+            CString::new(r#"permit(principal == User::"bob", action, resource);"#).unwrap();
 
         cedar_engine_set_policies(engine_a, policy_a.as_ptr());
         cedar_engine_set_policies(engine_b, policy_b.as_ptr());
 
-        let alice  = CString::new(r#"User::"alice""#).unwrap();
-        let bob    = CString::new(r#"User::"bob""#).unwrap();
+        let alice = CString::new(r#"User::"alice""#).unwrap();
+        let bob = CString::new(r#"User::"bob""#).unwrap();
         let action = CString::new(r#"Action::"view""#).unwrap();
-        let file   = CString::new(r#"File::"x""#).unwrap();
+        let file = CString::new(r#"File::"x""#).unwrap();
 
         let d_a_alice = cedar_engine_is_authorized(
-            engine_a, alice.as_ptr(), action.as_ptr(), file.as_ptr(), std::ptr::null(),
+            engine_a,
+            alice.as_ptr(),
+            action.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
         );
         let d_a_bob = cedar_engine_is_authorized(
-            engine_a, bob.as_ptr(), action.as_ptr(), file.as_ptr(), std::ptr::null(),
+            engine_a,
+            bob.as_ptr(),
+            action.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
         );
         let d_b_alice = cedar_engine_is_authorized(
-            engine_b, alice.as_ptr(), action.as_ptr(), file.as_ptr(), std::ptr::null(),
+            engine_b,
+            alice.as_ptr(),
+            action.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
         );
         let d_b_bob = cedar_engine_is_authorized(
-            engine_b, bob.as_ptr(), action.as_ptr(), file.as_ptr(), std::ptr::null(),
+            engine_b,
+            bob.as_ptr(),
+            action.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
         );
 
-        assert!(matches!(d_a_alice, CedarDecision::Allow), "engine_a: alice → Allow");
-        assert!(matches!(d_a_bob,   CedarDecision::Deny),  "engine_a: bob → Deny");
-        assert!(matches!(d_b_alice, CedarDecision::Deny),  "engine_b: alice → Deny");
-        assert!(matches!(d_b_bob,   CedarDecision::Allow), "engine_b: bob → Allow");
+        assert!(
+            matches!(d_a_alice, CedarDecision::Allow),
+            "engine_a: alice → Allow"
+        );
+        assert!(
+            matches!(d_a_bob, CedarDecision::Deny),
+            "engine_a: bob → Deny"
+        );
+        assert!(
+            matches!(d_b_alice, CedarDecision::Deny),
+            "engine_b: alice → Deny"
+        );
+        assert!(
+            matches!(d_b_bob, CedarDecision::Allow),
+            "engine_b: bob → Allow"
+        );
 
         cedar_engine_free(engine_a);
         cedar_engine_free(engine_b);
@@ -1305,21 +1478,21 @@ mod tests {
         assert_eq!(rc, 0, "set_policies should succeed");
 
         let alice = CString::new(r#"User::"alice""#).unwrap();
-        let bob   = CString::new(r#"User::"bob""#).unwrap();
+        let bob = CString::new(r#"User::"bob""#).unwrap();
 
         let test_cases = [
-            (r#"Action::"SELECT""#,   r#"Table::"public.items""#),
-            (r#"Action::"INSERT""#,   r#"Table::"public.items""#),
-            (r#"Action::"UPDATE""#,   r#"Table::"public.items""#),
-            (r#"Action::"DELETE""#,   r#"Table::"public.items""#),
+            (r#"Action::"SELECT""#, r#"Table::"public.items""#),
+            (r#"Action::"INSERT""#, r#"Table::"public.items""#),
+            (r#"Action::"UPDATE""#, r#"Table::"public.items""#),
+            (r#"Action::"DELETE""#, r#"Table::"public.items""#),
             (r#"Action::"TRUNCATE""#, r#"Table::"public.items""#),
-            (r#"Action::"SELECT""#,   r#"Column::"public.items.id""#),
-            (r#"Action::"EXECUTE""#,  r#"Routine::"get_value""#),
-            (r#"Action::"USAGE""#,    r#"Schema::"public""#),
+            (r#"Action::"SELECT""#, r#"Column::"public.items.id""#),
+            (r#"Action::"EXECUTE""#, r#"Routine::"get_value""#),
+            (r#"Action::"USAGE""#, r#"Schema::"public""#),
         ];
 
         for (action_str, resource_str) in &test_cases {
-            let action   = CString::new(*action_str).unwrap();
+            let action = CString::new(*action_str).unwrap();
             let resource = CString::new(*resource_str).unwrap();
 
             let d_alice = cedar_engine_is_authorized(
@@ -1356,25 +1529,41 @@ mod tests {
 
         let policy = CString::new(
             r#"permit(principal == User::"alice", action == Action::"view", resource);"#,
-        ).unwrap();
+        )
+        .unwrap();
         cedar_engine_set_policies(engine, policy.as_ptr());
 
-        let alice   = CString::new(r#"User::"alice""#).unwrap();
-        let action  = CString::new(r#"Action::"view""#).unwrap();
-        let file    = CString::new(r#"File::"x""#).unwrap();
+        let alice = CString::new(r#"User::"alice""#).unwrap();
+        let action = CString::new(r#"Action::"view""#).unwrap();
+        let file = CString::new(r#"File::"x""#).unwrap();
 
-        cedar_engine_is_authorized(engine, alice.as_ptr(), action.as_ptr(), file.as_ptr(), std::ptr::null());
+        cedar_engine_is_authorized(
+            engine,
+            alice.as_ptr(),
+            action.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+        );
 
         let diag = cedar_engine_get_diagnostics(engine);
         assert!(!diag.is_null());
         let diag_str = unsafe { std::ffi::CStr::from_ptr(diag) }.to_str().unwrap();
 
         // The JSON must contain both "reasons" and "errors" arrays
-        assert!(diag_str.contains("\"reasons\""), "diagnostics must have reasons: {diag_str}");
-        assert!(diag_str.contains("\"errors\""),  "diagnostics must have errors: {diag_str}");
+        assert!(
+            diag_str.contains("\"reasons\""),
+            "diagnostics must have reasons: {diag_str}"
+        );
+        assert!(
+            diag_str.contains("\"errors\""),
+            "diagnostics must have errors: {diag_str}"
+        );
 
         // For an Allow decision the reasons array must be non-empty (contains the policy id)
-        assert!(diag_str.contains("policy"), "diagnostics reasons should name the matching policy: {diag_str}");
+        assert!(
+            diag_str.contains("policy"),
+            "diagnostics reasons should name the matching policy: {diag_str}"
+        );
 
         cedar_engine_free(engine);
     }
@@ -1388,25 +1577,40 @@ mod tests {
             r#"permit(principal == User::"alice", action == Action::"SELECT", resource)
                when { context.day == "mon" || context.day == "tue" || context.day == "wed" ||
                       context.day == "thu" || context.day == "fri" };"#,
-        ).unwrap();
+        )
+        .unwrap();
         cedar_engine_set_policies(engine, policy.as_ptr());
 
-        let alice    = CString::new(r#"User::"alice""#).unwrap();
-        let action   = CString::new(r#"Action::"SELECT""#).unwrap();
+        let alice = CString::new(r#"User::"alice""#).unwrap();
+        let action = CString::new(r#"Action::"SELECT""#).unwrap();
         let resource = CString::new(r#"Table::"public.t""#).unwrap();
 
         let weekday_ctx = CString::new(r#"{"day":"wed","date":20260304}"#).unwrap();
         let weekend_ctx = CString::new(r#"{"day":"sat","date":20260307}"#).unwrap();
 
         let d_weekday = cedar_engine_is_authorized(
-            engine, alice.as_ptr(), action.as_ptr(), resource.as_ptr(), weekday_ctx.as_ptr(),
+            engine,
+            alice.as_ptr(),
+            action.as_ptr(),
+            resource.as_ptr(),
+            weekday_ctx.as_ptr(),
         );
-        assert!(matches!(d_weekday, CedarDecision::Allow), "wednesday should be allowed");
+        assert!(
+            matches!(d_weekday, CedarDecision::Allow),
+            "wednesday should be allowed"
+        );
 
         let d_weekend = cedar_engine_is_authorized(
-            engine, alice.as_ptr(), action.as_ptr(), resource.as_ptr(), weekend_ctx.as_ptr(),
+            engine,
+            alice.as_ptr(),
+            action.as_ptr(),
+            resource.as_ptr(),
+            weekend_ctx.as_ptr(),
         );
-        assert!(matches!(d_weekend, CedarDecision::Deny), "saturday should be denied");
+        assert!(
+            matches!(d_weekend, CedarDecision::Deny),
+            "saturday should be denied"
+        );
 
         cedar_engine_free(engine);
     }
