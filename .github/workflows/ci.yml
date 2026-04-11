@@ -55,7 +55,7 @@ jobs:
 
     - name: Verify staged package layout
       run: |
-        rg --files "$RUNNER_TEMP/libcedar-stage"
+        ls -R "$RUNNER_TEMP/libcedar-stage"
         test -f "$RUNNER_TEMP/libcedar-stage/opt/libcedar/include/libcedar.h"
         test -f "$RUNNER_TEMP/libcedar-stage/opt/libcedar/lib/pkgconfig/libcedar.pc"
 
