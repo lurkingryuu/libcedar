@@ -29,8 +29,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - runner: macos-13
-            target: x86_64-apple-darwin
+          # macOS-14 (Apple Silicon / aarch64).
+          # Intel macOS (macos-13) is retired on GitHub Actions; x86_64-apple-darwin
+          # users should build from source with: cargo cinstall --release --prefix=...
           - runner: macos-14
             target: aarch64-apple-darwin
 
