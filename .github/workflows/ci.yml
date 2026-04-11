@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  STAGE_DIR: ${{ runner.temp }}/libcedar-stage
 
 jobs:
   build_and_test:
@@ -50,19 +49,19 @@ jobs:
     - name: Build installable C package
       run: |
         cargo cbuild --release
-        rm -rf "$STAGE_DIR"
-        mkdir -p "$STAGE_DIR"
-        cargo cinstall --release --prefix=/opt/libcedar --destdir="$STAGE_DIR"
+        rm -rf "$RUNNER_TEMP/libcedar-stage"
+        mkdir -p "$RUNNER_TEMP/libcedar-stage"
+        cargo cinstall --release --prefix=/opt/libcedar --destdir="$RUNNER_TEMP/libcedar-stage"
 
     - name: Verify staged package layout
       run: |
-        rg --files "$STAGE_DIR"
-        test -f "$STAGE_DIR/opt/libcedar/include/libcedar.h"
-        test -f "$STAGE_DIR/opt/libcedar/lib/pkgconfig/libcedar.pc"
+        rg --files "$RUNNER_TEMP/libcedar-stage"
+        test -f "$RUNNER_TEMP/libcedar-stage/opt/libcedar/include/libcedar.h"
+        test -f "$RUNNER_TEMP/libcedar-stage/opt/libcedar/lib/pkgconfig/libcedar.pc"
 
     - name: Run C integration tests against installed package
       run: |
-        export PKG_CONFIG_SYSROOT_DIR="$STAGE_DIR"
-        export PKG_CONFIG_PATH="$STAGE_DIR/opt/libcedar/lib/pkgconfig"
+        export PKG_CONFIG_SYSROOT_DIR="$RUNNER_TEMP/libcedar-stage"
+        export PKG_CONFIG_PATH="$RUNNER_TEMP/libcedar-stage/opt/libcedar/lib/pkgconfig"
         cc -o tests/test_libcedar tests/test_libcedar.c $(pkg-config --cflags --libs libcedar)
-        LD_LIBRARY_PATH="$STAGE_DIR/opt/libcedar/lib" ./tests/test_libcedar
+        LD_LIBRARY_PATH="$RUNNER_TEMP/libcedar-stage/opt/libcedar/lib" ./tests/test_libcedar
