@@ -541,6 +541,63 @@ static void test_context_day_gating(void) {
     PASS("context day-gating policy");
 }
 
+static void test_mysql_schema_context_extension(void) {
+    static const char *MYSQL_SCHEMA_JSON =
+        "{"
+        "  \"MySQL\": {"
+        "    \"entityTypes\": {"
+        "      \"User\":  { \"shape\": { \"type\": \"Record\", \"attributes\": {} } },"
+        "      \"Table\": { \"shape\": { \"type\": \"Record\", \"attributes\": {} } }"
+        "    },"
+        "    \"actions\": {"
+        "      \"SELECT\": {"
+        "        \"appliesTo\": {"
+        "          \"principalTypes\": [\"User\"],"
+        "          \"resourceTypes\": [\"Table\"],"
+        "          \"context\": {"
+        "            \"type\": \"Record\","
+        "            \"attributes\": {"
+        "              \"day\":  { \"type\": \"String\" },"
+        "              \"date\": { \"type\": \"Long\" },"
+        "              \"time\": { \"type\": \"Long\" },"
+        "              \"ip\":   { \"type\": \"Extension\", \"name\": \"ipaddr\" }"
+        "            }"
+        "          }"
+        "        }"
+        "      }"
+        "    }"
+        "  }"
+        "}";
+
+    CedarEngine *engine = cedar_engine_new();
+    ASSERT(engine != NULL, "engine should not be NULL");
+
+    int rc = cedar_engine_set_schema_json(engine, MYSQL_SCHEMA_JSON);
+    ASSERT(rc == 0, "set_schema_json should succeed");
+
+    rc = cedar_engine_set_policies(
+        engine,
+        "permit(principal == MySQL::User::\"alice\","
+        "       action == MySQL::Action::\"SELECT\","
+        "       resource == MySQL::Table::\"test.users\");");
+    ASSERT(rc == 0, "set_policies should succeed");
+
+    rc = cedar_engine_validate(engine);
+    ASSERT(rc == 0, "validate should pass for MySQL schema");
+
+    CedarDecision d = cedar_engine_is_authorized(
+        engine,
+        "MySQL::User::\"alice\"",
+        "MySQL::Action::\"SELECT\"",
+        "MySQL::Table::\"test.users\"",
+        "{\"day\":\"mon\",\"date\":20260414,\"time\":123000,"
+        "\"ip\":{\"__extn\":{\"fn\":\"ip\",\"arg\":\"127.0.0.1\"}}}");
+    ASSERT(d == Allow, "MySQL schema request with ip extension should allow");
+
+    cedar_engine_free(engine);
+    PASS("mysql schema context extension");
+}
+
 int main(void) {
     printf("libcedar C test suite\n");
     printf("=====================\n");
@@ -571,6 +628,7 @@ int main(void) {
     test_namespace_uids();
     test_validate_without_schema();
     test_context_day_gating();
+    test_mysql_schema_context_extension();
 
     printf("\nAll tests passed!\n");
     return 0;
